@@ -1,0 +1,592 @@
+---
+title: "Défis Performance énergétique"
+author: "Kenny Jean Elie- Ibrahima Caba Bah- Ndèye Fatou Diop"
+date: "2025-11-07"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns        # disposition en colonnes
+    vertical_layout: fill       # ajuste à la taille de l'écran
+    theme: flatly     # thème clair et moderne
+    highlight: tango            # style du code
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+library(scales)
+library(ggalluvial)
+library(tidymodels)
+library(randomForest)
+library(broom)
+library(stringr)
+library(readr)  
+library(flexdashboard)
+library(readxl) 
+library(dplyr)    
+library(plotly)   
+library(shiny)
+library(bslib)
+library(leaflet)
+library(sf)
+library(ggplot2)
+library(ggiraph)
+```
+
+
+
+```{r}
+# Charger les données
+df<- read_csv("base_final.csv")
+tarif_eur_par_kwh <- 0.20                     # hypothèse tarifaire (€ / kWh)
+dpi_plot <- 300
+dpe_levels <- c("A","B","C","D","E","F","G")
+
+```
+
+```{r echo=FALSE}
+
+# Conversion en kWh
+df <- df %>%
+  mutate(
+    conso_totale_kwh = `Consommation annuelle moyenne par logement de l'adresse (MWh)` * 1000,
+    conso_moy_adresse_kwh = `Consommation annuelle moyenne par logement de l'adresse (MWh)`* 1000,
+    conso_m2_kwh_an = if_else(!is.na(surface_habitable_logement) & surface_habitable_logement > 0,
+                              conso_moy_adresse_kwh / surface_habitable_logement,
+                              NA_real_)
+  )
+
+df <- df %>%
+  mutate(etiquette_dpe = toupper(str_trim(etiquette_dpe)),
+         etiquette_dpe = factor(if_else(etiquette_dpe %in% dpe_levels, etiquette_dpe, NA_character_),
+                                levels = dpe_levels),
+         type_energie = type_energie_n1)
+
+stats_dpe <- df %>%
+  group_by(etiquette_dpe) %>%
+  summarise(
+    n = n(),
+    mean_kwh = mean(conso_moy_adresse_kwh, na.rm = TRUE),
+    sd_kwh = sd(conso_moy_adresse_kwh, na.rm = TRUE),
+    median_kwh = median(conso_moy_adresse_kwh, na.rm = TRUE),
+    mean_kwh_m2 = mean(conso_m2_kwh_an, na.rm = TRUE)
+  ) %>%
+  arrange(etiquette_dpe)
+
+# Calcul des gains moyens (différences) entre classes (en kWh/an et en euros)
+# On produit une matrice de différences mean(class_i) - mean(class_j)
+means <- stats_dpe %>% select(etiquette_dpe, mean_kwh) %>% drop_na()
+mat_diff <- outer(means$mean_kwh, means$mean_kwh, "-")
+rownames(mat_diff) <- means$etiquette_dpe
+colnames(mat_diff) <- means$etiquette_dpe
+
+# Sauvegarde tableau différences
+diffs_df <- as_tibble(as.data.frame(mat_diff), rownames = "de_class") %>%
+  pivot_longer(-de_class, names_to = "ala_class", values_to = "diff_kwh")
+diffs_df <- diffs_df %>% mutate(diff_eur = diff_kwh * tarif_eur_par_kwh)
+
+
+``` 
+
+# Base {.sidebar}
+
+### 🎛️ Paramètres de l'analyse
+
+```{r}
+selectInput("Annee",
+            label = "Année d'analyse", 
+            choices = unique(df$Année),
+            selected = unique(df$Année)[1])
+```
+
+---
+
+### 📊 Indicateurs clés
+```{r , echo= FALSE}
+
+  nb_inscrits_tour1 <- nrow(df)
+```
+
+
+```{r}
+
+value_box(
+  title = tags$span("Nombre de logements", style = "font-size: 16px; font-weight: bold;"),
+  value = format(nb_inscrits_tour1, big.mark = " "),
+  showcase = bsicons::bs_icon("house-fill"),
+  theme = "bg-success"
+)
+ 
+
+```
+
+
+---
+
+### ℹ️ À propos
+
+**Dashboard de performance énergétique**
+
+Ce tableau de bord présente une analyse complète des performances énergétiques des logements basée sur les diagnostics de performance énergétique (DPE).
+
+**Tarif de référence:** 0,20 €/kWh
+
+---
+
+
+
+### 📌 Légende DPE
+
+<div style="font-size: 12px;">
+**Classes énergétiques:**
+- <span style="color: #00B050;">●</span> **A** : Très performant
+- <span style="color: #92D050;">●</span> **B** : Performant
+- <span style="color: #b8f774;">●</span> **C** : Assez performant
+- <span style="color: #FFFF00;">●</span> **D** : Moyen
+- <span style="color: #FFC000;">●</span> **E** : Passable
+- <span style="color: #ED7D31;">●</span> **F** : Médiocre
+- <span style="color: #C00000;">●</span> **G** : Très médiocre
+</div>
+
+# Diagnostic DPE et localisation
+
+## Column {.tabset data-width=500}
+
+### 📈 Répartition par DPE
+
+```{r}
+renderPlotly({
+  # Filtrer les données selon l'année sélectionnée
+  df_filtre <- df %>%
+    filter(Année == input$Annee)
+  
+  # Calculer les statistiques sur les données filtrées
+  resultats_groupes <- df_filtre %>%
+    group_by(etiquette_dpe) %>%
+    summarise(Nombre_obs = n()) %>%
+    ungroup()
+  
+  total_obs <- sum(resultats_groupes$Nombre_obs)
+  
+  resultats_groupes <- resultats_groupes %>%
+    mutate(Pourcentage = (Nombre_obs / total_obs) * 100)
+  
+  resultats_groupes$hover_text <- paste(
+    "Étiquette DPE : ", resultats_groupes$etiquette_dpe, "<br>",
+    "Nombre d'observations : ", scales::comma(resultats_groupes$Nombre_obs), "<br>",
+    "Pourcentage : ", round(resultats_groupes$Pourcentage, 2), "%"
+  )
+  
+  ordre_dpe <- c("A", "B", "C", "D", "E", "F", "G", "Autres")
+  resultats_groupes <- resultats_groupes %>%
+    arrange(factor(etiquette_dpe, levels = ordre_dpe))
+  
+  couleurs_dpe <- c(
+    "A" = "#1a9850", "B" = "#66bd63", "C" = "#a6d96a",
+    "D" = "#fdae61", "E" = "#f46d43", "F" = "#d73027",
+    "G" = "#a50026", "Autres" = "#BEBEBE"
+  )
+  
+  # Créer le graphique
+  plot_ly(
+    resultats_groupes,
+    labels = ~etiquette_dpe,
+    values = ~Pourcentage,
+    type = 'pie',
+    sort = FALSE,
+    textinfo = 'label+percent',
+    hoverinfo = 'text',
+    text = ~hover_text,
+    marker = list(
+      colors = couleurs_dpe,
+      line = list(color = '#FFFFFF', width = 1)
+    ),
+    insidetextorientation = 'horizontal',
+    textposition = 'inside'
+  ) %>%
+    layout(
+      title = list(
+        text = paste("Répartition des logements par étiquette DPE -", input$Annee),
+        font = list(size = 18, color = 'black', family = 'Arial')
+      ),
+      showlegend = TRUE,
+      legend = list(
+        orientation = 'h',
+        x = 0.5,
+        xanchor = 'center',
+        y = -0.1
+      ),
+      margin = list(t = 80, b = 60, l = 20, r = 20),
+      pie = list(rotation = 180)
+    ) %>%
+    config(displayModeBar = FALSE)
+})
+```
+
+### ⚡ Consommation par type d'énergie
+
+```{r}
+renderPlotly({
+  # Filtrer les données selon l'année sélectionnée
+  df_filtre <- df %>%
+    filter(Année == input$Annee)
+  
+  # Calculer les statistiques sur les données filtrées
+  chauffage_stats <- df_filtre %>%
+    group_by(type_energie) %>%
+    summarise(
+      n = n(),
+      conso_moy = mean(conso_moy_adresse_kwh, na.rm = TRUE)
+    ) %>%
+    arrange(desc(conso_moy))
+  
+  # Créer le graphique
+  plot_ly(
+    data = chauffage_stats,
+    x = ~conso_moy,
+    y = ~reorder(type_energie, conso_moy),
+    type = 'bar',
+    orientation = 'h',
+    text = ~paste(
+      "Type de chauffage :", type_energie, "<br>",
+      "Consommation moyenne :", format(round(conso_moy, 0), big.mark = " "), "kWh<br>",
+      "Nombre de logements :", format(n, big.mark = " ")
+    ),
+    hoverinfo = "text",
+    textposition ="none",
+    marker = list(
+      color = ~conso_moy,
+      colorscale = list(
+        c(0, '#00B050'),
+        c(0.5, '#FFC000'),
+        c(1, '#C00000')
+      ),
+      showscale = FALSE,
+      line = list(color = 'white', width = 1)
+    )
+  ) %>%
+    layout(
+      title = list(
+        text = paste("Consommation moyenne selon le type de chauffage -", input$Annee),
+        font = list(size = 18, family = 'Arial')
+      ),
+      xaxis = list(
+        title = "Consommation (kWh/an)",
+        titlefont = list(size = 14, family = 'Arial')
+      ),
+      yaxis = list(
+        title = "",
+        titlefont = list(size = 14, family = 'Arial')
+      ),
+      margin = list(t = 80, b = 60, l = 150, r = 40),
+      plot_bgcolor = '#f8f9fa',
+      paper_bgcolor = '#ffffff'
+    ) %>%
+    config(displayModeBar = FALSE)
+})
+```
+
+### 📈 Statistiques
+
+```{r}
+renderTable({
+  stats_dpe %>%
+    filter(!is.na(etiquette_dpe)) %>%
+    select(
+      Classe = etiquette_dpe,
+      N = n,
+      `Moyenne (kWh)` = mean_kwh,
+      `Médiane (kWh)` = median_kwh
+    ) %>%
+    mutate(
+      `Moyenne (kWh)` = format(round(`Moyenne (kWh)`, 0), big.mark = " "),
+      `Médiane (kWh)` = format(round(`Médiane (kWh)`, 0), big.mark = " "),
+      N = format(N, big.mark = " ")
+    )
+}, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
+```
+
+
+### 🗺️Cartographie des Consommations 
+
+```{r prep_map_base, include=FALSE}
+# Charger la géométrie une seule fois (nécessaire pour la jointure)
+france_departements <- st_read("https://static.data.gouv.fr/resources/carte-des-101-departements-francais-projetes-en-lambert-sous-la-metropole/20211121-183910/101deps-lambert.geojson")
+
+# Assurer que la colonne de jointure (INSEE_DEP) est en format caractère
+france_departements$INSEE_DEP <- as.character(france_departements$INSEE_DEP)
+```
+
+```{r echo=FALSE}
+output$ma_carte_interactive <- renderGirafe({ 
+
+    # --- 1. Filtrage et Agrégation ---
+    df_departemental_reactive <- df %>%
+      filter(Année == input$Annee) %>% 
+      mutate(
+        `Consommation annuelle totale de l'adresse (MWh)` = as.numeric(gsub(",", ".", `Consommation annuelle totale de l'adresse (MWh)`)),
+        `Nombre de logements` = as.numeric(`Nombre de logements`)
+      ) %>%
+      group_by(`code_departement_ban`) %>%
+      summarise(
+        somme_conso_MWh = sum(`Consommation annuelle totale de l'adresse (MWh)`, na.rm = TRUE),
+        somme_logements = sum(`Nombre de logements`, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        conso_moyenne_par_logement_MWh = round(somme_conso_MWh / somme_logements, 3)
+      ) %>%
+      rename(Code_Departement = `code_departement_ban`)
+
+    df_departemental_reactive$Code_Departement <- as.character(df_departemental_reactive$Code_Departement)
+
+    # Jointure
+    france_departements_final_reactive <- merge(
+      x = france_departements,
+      y = df_departemental_reactive,
+      by.x = "INSEE_DEP",
+      by.y = "Code_Departement",
+      all.x = TRUE
+    )
+    
+    # *** ÉTAPE CLÉ : Calcul des Min et Max pour la légende ***
+    conso_data <- france_departements_final_reactive$conso_moyenne_par_logement_MWh
+    min_conso <- min(conso_data, na.rm = TRUE)
+    max_conso <- max(conso_data, na.rm = TRUE)
+    
+    # Définir les breaks pour inclure le min et le max, plus quelques valeurs intermédiaires
+    custom_breaks <- scales::pretty_breaks(n = 3)(c(min_conso, max_conso))
+    
+    # Assurer que le min et le max réels sont inclus comme premières et dernières étiquettes
+    if (!(round(min_conso, 2) %in% round(custom_breaks, 2))) {
+      custom_breaks <- sort(unique(c(custom_breaks, min_conso)))
+    }
+    if (!(round(max_conso, 2) %in% round(custom_breaks, 2))) {
+      custom_breaks <- sort(unique(c(custom_breaks, max_conso)))
+    }
+    
+    # Mise en forme des étiquettes (arrondi à 2 décimales)
+    custom_labels <- paste0(round(custom_breaks, 2), " MWh")
+
+
+    # --- 2. Préparation du Tooltip et Création du graphique ggplot interactif ---
+    france_departements_final_reactive <- france_departements_final_reactive %>%
+      mutate(
+        display_conso = ifelse(is.na(conso_moyenne_par_logement_MWh), 
+                               "Données non disponibles", 
+                               paste0(conso_moyenne_par_logement_MWh, " MWh/logement")),
+                               
+        tooltip_text = paste0(
+          "Département : ", NOM_DEP, " (", INSEE_DEP, ")", "\n",
+          "Conso moyenne : ", display_conso
+        )
+      )
+      
+    titre_map <- paste0(
+        "Consommation moyenne par logement (MWh) par Département\n", 
+        "Année ", input$Annee
+    )
+
+    gg_map <- ggplot(data = france_departements_final_reactive) +
+      geom_sf_interactive(
+        aes(
+          fill = conso_moyenne_par_logement_MWh,
+          tooltip = tooltip_text, 
+          data_id = INSEE_DEP      
+        ),
+        color = "gray",
+        linewidth = 0.1
+      ) +
+      scale_fill_distiller(
+        palette = "Greens",
+        name = "Conso moyenne (MWh/logement)",
+        direction = 1,
+        na.value = "lightgray",
+        
+        breaks = custom_breaks, 
+        labels = custom_labels,
+        guide = guide_colorbar(title.position = "top", title.hjust = 0.5) 
+      ) +
+      labs(
+        title = titre_map
+      ) +
+      theme_minimal() +
+      theme(
+        # *** CORRECTION 1 : Déplacement de la légende à gauche ***
+        legend.position = "left", 
+        
+        # *** CORRECTION 2 : Réinitialisation de la marge pour centrer la carte ***
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"), 
+        
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold"),
+        
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 10),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()
+      )
+
+    # Retourne l'objet girafe
+    girafe(ggobj = gg_map)
+})
+
+# --- PARTIE D'AFFICHAGE (UI) ---
+girafeOutput("ma_carte_interactive", height = "600px")
+```
+
+
+Visualisation des tendances
+=====================================
+
+column
+-------------------------------------
+```{r setup_theme, include=FALSE}
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      legend.position = "none"
+    )
+)
+
+```
+
+
+
+
+### 
+
+```{r echo=FALSE}
+renderPlot({
+  ggplot(df %>% filter(!is.na(etiquette_dpe)), 
+         aes(x = etiquette_dpe, 
+             y = conso_moy_adresse_kwh, 
+             fill = etiquette_dpe)) +
+    geom_boxplot(outlier.size = 0.8, notch = FALSE) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 2, colour = "red") +
+    labs(title = "Distribution de la consommation mesuree par classe DPE",
+         x = "Classe DPE", y = "Consommation mesuree (kWh / an)") +
+    coord_cartesian(ylim = c(0,12000))+
+    scale_y_continuous(labels = comma) +
+    scale_fill_manual(
+      values = c(
+        "A" = "#00B050", "B" = "#92D050", "C" = "#b8f774",
+        "D" = "#FFFF00", "E" = "#FFC000", "F" = "#ED7D31", "G" = "#C00000" 
+      )
+    ) +
+   theme(plot.title = element_text(face = "bold"), 
+         axis.title = element_text(face = "bold"))
+})
+```
+
+
+
+###
+
+```{r echo= FALSE}
+renderPlot({
+  stats_dpe %>%
+    ggplot(aes(x = etiquette_dpe, y = mean_kwh, fill = etiquette_dpe)) +
+    geom_col() +
+    geom_errorbar(aes(ymin = mean_kwh - sd_kwh, ymax = mean_kwh + sd_kwh), width = 0.2) +
+    labs(title = "Consommation moyenne par classe DPE ",
+         x = "Classe DPE", y = "Moyenne consommation (kWh / an)") +
+    scale_y_continuous(labels = comma)  +
+    scale_fill_manual(
+      values = c(
+        "A" = "#00B050", "B" = "#92D050", "C" = "#b8f774",
+        "D" = "#FFFF00", "E" = "#FFC000", "F" = "#ED7D31", "G" = "#C00000" 
+      )
+    ) +
+    theme(plot.title = element_text(face = "bold"), 
+          axis.title = element_text(face = "bold"))
+})
+```
+
+column 
+-------------------------------------
+
+###
+
+```{r include=FALSE}
+heat_df <- diffs_df %>% mutate(de_class = factor(de_class, levels = dpe_levels),
+                               ala_class = factor(ala_class, levels = dpe_levels))
+```
+
+```{r}
+renderPlot({
+  ggplot(heat_df %>% drop_na(), aes(x = ala_class, y = de_class, fill = diff_kwh)) +
+    geom_tile() +
+    geom_text(aes(label = round(diff_kwh)), size = 3) +
+    labs(title = "Difference de consommation moyenne (kWh/an) ",
+         x = "vers", y = "depuis", fill = "kWh") +
+    scale_fill_gradient2(
+      low = "#00B050",
+      high = "#C00000"
+    ) +
+    theme(plot.title = element_text(face = "bold"), 
+          axis.title = element_text(face = "bold"))
+})
+
+
+```
+
+###
+
+```{r}
+renderPlot({
+  ggplot(df %>% filter(!is.na(conso_m2_kwh_an) & !is.na(etiquette_dpe)),
+                 aes(x = etiquette_dpe, y = conso_m2_kwh_an, fill = etiquette_dpe)) +
+    geom_boxplot() +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 2, colour = "red") +
+    labs(title = "Consommation normalisee (kWh/m2.an) par classe DPE",
+         x = "Classe DPE", y = "kWh / m2 / an") +
+    scale_fill_manual(
+      values = c(
+        "A" = "#00B050", "B" = "#92D050", "C" = "#b8f774",
+        "D" = "#FFFF00", "E" = "#FFC000", "F" = "#ED7D31", "G" = "#C00000" 
+    )
+      ) +
+    theme(plot.title = element_text(face = "bold"), 
+          axis.title = element_text(face = "bold"))
+})
+```
+
+Synthèse
+======================================
+
+Ce dashboard a été fait dans le cadre du [open data university challenge](https://latitudes.notion.site/Saison-4-Espace-tudiants-et-tudiantes-Open-Data-University-242ff5903e5a806c969fe369fd105aa2https://latitudes.notion.site/Saison-4-Espace-tudiants-et-tudiantes-Open-Data-University-242ff5903e5a806c969fe369fd105aa2) les bases de données proviennent de [Defis.data.gouv](https://defis.data.gouv.fr/defis/diagnostics-de-performance-energetique)
+
+En tant qu'apprentis économistes, ce dashboard R/Flexdashboard est notre réponse concrète au défi de la performance énergétique.
+Nous avons structuré cet outil pour transformer des données brutes DPE en une feuille de route claire pour la rénovation.
+
+Le dashboard commence par un diagnostic technique précis de la répartition des classes DPE dans l'échantillon analysé.
+Notre analyse quantifie rigoureusement la consommation réelle (kWh) par classe énergétique et selon le type de chauffage.
+
+L'innovation clé réside dans la cartographie interactive, permettant de cibler les départements ayant la consommation la plus élevée.Nous avons également modélisé, via une heatmap, les gains énergétiques potentiels d'une rénovation.
+
+Cette quantification des économies (kWh/an) par changement de classe DPE est notre outil d'aide à la décision majeur.
+
+Tout ce que présente ce dashboard est le fruit d'un traitement de données rigoureux en plusieurs étapes :
+
+**Préparation**: Nettoyage des données brutes, conversion des unités (MWh en kWh), et normalisation des étiquettes DPE.
+
+**Calcul d'Indicateurs**: Création des indicateurs clés (consommation/m², statistiques descriptives) et calcul stratégique des gains potentiels de rénovation (heatmap).
+
+**Spatialisation** : Agrégation des consommations par département et jointure des données pour la cartographie.
+
+Ce travail a été réalisé par :
+
+- [Ndeye Fatou Diop](https://www.linkedin.com/in/ndèye-fatou-diop-6b88b8218)
+- [Kenny JEAN-ELIE](https://www.linkedin.com/in/kenny-jean-elie-b84175304/)
+- [Bah Ibrahima Caba](https://www.linkedin.com/in/ibrahima-caba-bah-3a8419258)
+
+
+
+
+
