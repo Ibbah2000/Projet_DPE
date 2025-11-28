@@ -1,6 +1,6 @@
 Ce dashboard a été fait dans le cadre du [open data university challenge](https://latitudes.notion.site/Saison-4-Espace-tudiants-et-tudiantes-Open-Data-University-242ff5903e5a806c969fe369fd105aa2https://latitudes.notion.site/Saison-4-Espace-tudiants-et-tudiantes-Open-Data-University-242ff5903e5a806c969fe369fd105aa2) les bases de données proviennent de [Defis.data.gouv](https://defis.data.gouv.fr/defis/diagnostics-de-performance-energetique)
 
-En tant qu'apprentis économistes, ce dashboard R/Flexdashboard est notre réponse concrète au défi de la performance énergétique.
+En tant qu'apprentis économistes, ce dashboard R Shiny est notre réponse concrète au défi de la performance énergétique.
 Nous avons structuré cet outil pour transformer des données brutes DPE en une feuille de route claire pour la rénovation.
 
 Le dashboard commence par un diagnostic technique précis de la répartition des classes DPE dans l'échantillon analysé.
